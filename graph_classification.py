@@ -1,176 +1,206 @@
+import time
 import os
-import random
-import numpy as np
+from typing import Tuple
+from dataclasses import dataclass
+import matplotlib.pyplot as plt
+import copy
 import argparse
-
 import torch
-from torch_geometric.datasets import TUDataset
-from torch_geometric.loader import DataLoader
+import torch.nn as nn
+from torch.utils.data import TensorDataset, DataLoader
+from tqdm import tqdm
+from sklearn.model_selection import train_test_split
+import numpy as np
 
-from sklearn.model_selection import StratifiedKFold
-from torch.utils.data import Subset
-
+# Gdeep imports
+from gdeep.data.datasets import OrbitsGenerator
+from orbit_utils import *
+from load_models import load_model_orbit
 from timm.scheduler import CosineLRScheduler
 
-from utils import convert_to_epd_list, rotate_epds, pixelization, train_one_epoch, test
-from load_models import load_model
-from gdeep.data.datasets.persistence_diagrams_from_graphs_builder import PersistenceDiagramFromGraphBuilder
-from gdeep.data.datasets import PersistenceDiagramFromFiles
+# Argument parsing
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train model with persistence diagrams.')
+    parser.add_argument('--samples_per_class', type=int, default=1000, help='Number of samples per class.')
+    parser.add_argument('--num_repeat', type=int, default=5, help='Number of times to repeat training.')
+    parser.add_argument('--patch_size', type=int, default=5, help='Patch size for persistence diagram.')
+    parser.add_argument('--embed_dim', type=int, default=192, help='Embedding dimension.')
+    parser.add_argument('--depth', type=int, default=5, help='Depth of the model.')
+    parser.add_argument('--patience', type=int, default=50, help='Patience for early stopping.')
+    parser.add_argument('--model_name', type=str, default='xpert', help='Model to be used (xpert or persformer).')
+    return parser.parse_args()
 
-def labels_preprocess(labels, dataname):
-    """Preprocess labels based on dataset name."""
-    if dataname in ['IMDB-MULTI', 'PROTEINS']:
-        labels = labels - 1
-    if any(name in dataname for name in ['MUTAG', 'COX2', 'DHFR']):
-        labels = 0.5 * labels + 0.5    
-    return labels
+@dataclass
+class Orbit5kConfig:
+    batch_size_train: int = 8
+    num_orbits_per_class: int = 1000
+    validation_percentage: float = 0.0
+    test_percentage: float = 0.3
+    num_jobs: int = 8
+    dynamical_system: str = "classical_convention"
+    homology_dimensions: Tuple[int, int] = (0, 1)
+    dtype: str = "float32"
+    arbitrary_precision: bool = False
 
 def main(args):
-    # Set random seeds for reproducibility
-    random.seed(42)
-    np.random.seed(42)
-    torch.manual_seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(42)
-        torch.cuda.manual_seed_all(42)
-
-    # Device configuration
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    # Extract arguments
-    dataname = args.dataname
-    model = args.model
-    grid_size = args.grid_size
+    patience = args.patience
+    samples_per_class = args.samples_per_class
+    num_repeat = args.num_repeat
     patch_size = args.patch_size
     embed_dim = args.embed_dim
     depth = args.depth
-    epochs = args.epochs
-    lr = args.lr
-    warmup_t = args.warmup_t
-    batch_size = args.batch_size
-    n_splits = args.n_splits
 
-    print(f"Dataset: {dataname}, Model: {model}, Patch Size: {patch_size}, Embed Dim: {embed_dim}, Depth: {depth}")
+    best_test_accs = []
+    print(f'depth: {depth}, embed_dim: {embed_dim}, patch_size: {patch_size}, samples_per_class: {samples_per_class}')
 
-    # Load the dataset
-    dataset = TUDataset(root='./data/GraphDatasets/', name=dataname)
-    num_classes = dataset.num_classes
+    for i in range(num_repeat):
+        model_name = args.model_name
 
-    # Initialize tensor for pixelized persistence diagrams
-    ppd = torch.zeros((len(dataset), 4, grid_size, grid_size), dtype=torch.float32)
+        config = {
+            'bs': 64,
+            'embed_dim': embed_dim,
+            'depth': depth,
+            'num_heads': 8,
+            'grid_size': 50,
+            'patch_size': patch_size,
+        }
 
-    # Create persistence diagrams from graphs
-    diffusion_parameter = 1.0
-    pd_creator = PersistenceDiagramFromGraphBuilder(dataname, diffusion_parameter=diffusion_parameter, root='./data')
-    pd_creator.create()
+        hyper_config = {
+            'epochs': 300,
+            'lr': 0.0001,
+            'warmup_t': 50,
+        }
 
-    # Load persistence diagrams
-    pd_ds = PersistenceDiagramFromFiles(
-        os.path.join('./data', f"{dataname}_{diffusion_parameter}_extended_persistence")
-    )
+        config_data = Orbit5kConfig(num_orbits_per_class=samples_per_class)
+        valid_dgms = False
 
-    # Preprocess labels
-    labels = [pd_ds[i][1] for i in range(len(pd_ds))]
-    labels = np.array(labels)
-    labels = labels_preprocess(labels, dataname)
-    print(f'{dataname} labels: {np.unique(labels)}')
+        while not valid_dgms:
+            og = OrbitsGenerator(
+                num_orbits_per_class=config_data.num_orbits_per_class,
+                homology_dimensions=config_data.homology_dimensions,
+                validation_percentage=config_data.validation_percentage,
+                test_percentage=config_data.test_percentage,
+                n_jobs=config_data.num_jobs,
+                dynamical_system=config_data.dynamical_system,
+                dtype=config_data.dtype,
+            )
 
-    # Convert and rotate persistence diagrams
-    epds, _ = convert_to_epd_list(pd_ds)
-    repds = rotate_epds(epds)  # List of rotated persistence diagrams
+            giotto_pdg = og.get_persistence_diagrams()
+            labels = og._labels
+            dgms, labels = pdg_dataset(giotto_pdg, labels, model_name=model_name)
 
-    # Pixelize persistence diagrams
-    for i in range(len(repds)):
-        ppd[i] = pixelization(repds[i], grid_size=grid_size, device='cpu')
+            dgms0 = dgms[0].reshape(-1)
+            dgms1 = dgms[1].reshape(-1)
 
-    # Verify that graph labels match persistence diagram labels
-    graph_labels = [dataset[i].y.item() for i in range(len(dataset))]
-    num_same_labels = (np.array(graph_labels) == labels).sum()
-    sanity = (num_same_labels == len(dataset))
-    print(f"Graph labels are the same as the labels in the persistence diagram dataset: {sanity}")
+            valid_test0 = ((dgms0 < 0).sum() == 0)
+            valid_test1 = ((dgms0 > 1).sum() == 0)
+            valid_test2 = ((dgms1 < 0).sum() == 0)
+            valid_test3 = ((dgms1 > 1).sum() == 0)
+            valid_dgms = valid_test0 and valid_test1 and valid_test2 and valid_test3
 
-    if not sanity:
-        print("Warning: Graph labels do not match persistence diagram labels.")
+        train_indices, test_indices = train_test_split(np.arange(len(labels)), test_size=0.3)
 
-    # Prepare data list
-    data_list = []
-    for idx, data in enumerate(dataset):
-        data.node_feat = torch.ones((data.num_nodes, 1), dtype=torch.float32)
-        data.ppd = ppd[idx]  # ppd[i].shape = (4, grid_size, grid_size)
-        data_list.append(data)
+        if model_name == 'xpert':
+            dgms0, dgms1 = dgms
+            dgms0_train, dgms1_train, labels_train = dgms0[train_indices], dgms1[train_indices], labels[train_indices]
+            dgms0_test, dgms1_test, labels_test = dgms0[test_indices], dgms1[test_indices], labels[test_indices]
 
-    # Stratified K-Fold cross-validation
-    skfold = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-    criterion = torch.nn.CrossEntropyLoss().to(device)
-    best_test_acc_list = []
+            train_dataset = TensorDataset(dgms0_train, dgms1_train, labels_train)
+            test_dataset = TensorDataset(dgms0_test, dgms1_test, labels_test)
 
-    # Cross-validation loop
-    for fold, (train_idx, test_idx) in enumerate(skfold.split(data_list, labels)):
-        print(f"Starting Fold {fold + 1}/{n_splits}")
+            train_loader = DataLoader(train_dataset, batch_size=config['bs'], shuffle=True)
+            test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
 
-        # Load model
-        model = load_model(
-            model, device, num_classes, grid_size, patch_size,
-            depth=depth, embed_dim=embed_dim
-        )
+        elif model_name == 'persformer':
+            masks = generate_masks(giotto_pdg)
+            giotto_pdg = torch.tensor(giotto_pdg, dtype=torch.float32)
+            masks = torch.tensor(masks, dtype=torch.float32)
+            labels = torch.tensor(labels, dtype=torch.long)
 
-        # Data loaders
-        train_loader = DataLoader(Subset(data_list, train_idx), batch_size=batch_size, shuffle=True)
-        test_loader = DataLoader(Subset(data_list, test_idx), batch_size=batch_size)
+            train_dataset = TensorDataset(giotto_pdg[train_indices], masks[train_indices], labels[train_indices])
+            test_dataset = TensorDataset(giotto_pdg[test_indices], masks[test_indices], labels[test_indices])
 
-        # Optimizer and scheduler
-        optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+            train_loader = DataLoader(train_dataset, batch_size=config['bs'], shuffle=True)
+            test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False)
+
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = load_model_orbit(model_name, config).to(device)
+
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=hyper_config['lr'])
         scheduler = CosineLRScheduler(
             optimizer,
-            t_initial=epochs,
+            t_initial=hyper_config['epochs'],
             cycle_mul=1,
-            lr_min=0.05 * lr,
-            cycle_decay=1.0,
-            warmup_lr_init=0.05 * lr,
-            warmup_t=warmup_t,
+            lr_min=0.05*hyper_config['lr'],
+            cycle_decay=1.,
+            warmup_lr_init=0.05*hyper_config['lr'],
+            warmup_t=hyper_config['warmup_t'],
             cycle_limit=1,
             t_in_epochs=True
         )
 
-        best_test_acc = 0.0
-        best_epoch = 0
-        epochs_no_improve = 0  # Counter for epochs with no improvement
+        best_test_acc = 0
+        for epoch in range(hyper_config['epochs']):
+            start_time = time.time()
+            model.train()
+            for data in train_loader:
+                optimizer.zero_grad()
+                if model_name == 'persformer':
+                    dgms, mask, labels = data
+                    dgms, mask, labels = dgms.to(device), mask.to(device), labels.to(device)
+                    output = model(dgms, mask)
+                elif model_name == 'xpert':
+                    dgms0, dgms1, labels = data
+                    dgms0, dgms1, labels = dgms0.to(device), dgms1.to(device), labels.to(device)
+                    output = model(dgms0, dgms1)
 
-        # Training loop
-        for epoch in range(epochs):
-            train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, scheduler=scheduler)
+                loss = criterion(output, labels)
+                loss.backward()
+                optimizer.step()
 
-            # Validation
-            test_loss, test_acc = test(model, test_loader, criterion, device)
+            scheduler.step(epoch)
 
-            # Early stopping logic
-            if test_acc > best_test_acc:
-                best_test_acc = test_acc
-                best_epoch = epoch
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
+            with torch.no_grad():
+                model.eval()
+                correct = 0
+                total = 0
+                for data in test_loader:
+                    if model_name == 'persformer':
+                        dgms, mask, labels = data
+                        dgms, mask, labels = dgms.to(device), mask.to(device), labels.to(device)
+                        output = model(dgms, mask)
+                    elif model_name == 'xpert':
+                        dgms0, dgms1, labels = data
+                        dgms0, dgms1, labels = dgms0.to(device), dgms1.to(device), labels.to(device)
+                        output = model(dgms0, dgms1)
 
-        print(f'Fold {fold + 1}/{n_splits} - Best Test Accuracy: {best_test_acc:.3f}')
-        best_test_acc_list.append(best_test_acc)
+                    _, predicted = torch.max(output.data, 1)
+                    total += labels.size(0)
+                    correct += (predicted == labels).sum().item()
 
-    # Final results
-    avg_acc = np.mean(best_test_acc_list)
-    std_acc = np.std(best_test_acc_list)
-    print(f'Average Best Test Accuracy over {n_splits} folds: {avg_acc:.3f} ± {std_acc:.3f}')
+                test_acc = 100 * correct / total
+                if test_acc > best_test_acc:
+                    best_test_acc = test_acc
+                    best_epoch = epoch
+
+                end_time = time.time()
+                print(f'\rEpoch {epoch} Accuracy: {test_acc:.2f}(best: {best_test_acc:.2f} at {best_epoch}), time: {(end_time - start_time):.3f}', end='')
+
+            if epoch - best_epoch > patience:
+                break
+        print()
+        best_test_accs.append(best_test_acc)
+    print(f'mean test accuracy: {np.mean(best_test_accs)} +- {np.std(best_test_accs)}')
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train model on dataset with persistence diagrams")
-    parser.add_argument('--dataname', type=str, default='PROTEINS', help="Dataset name") # Choose from ['IMDB-BINARY', 'IMDB-MULTI', 'MUTAG', 'PROTEINS', 'COX2', 'DHFR'] 
-    parser.add_argument('--model', type=str, default='xpert', help="Model name") # Choose from ['xpert', 'gin', 'gin_assisted_concat', 'gin_assisted_sum']
-    parser.add_argument('--grid_size', type=int, default=50, help="Grid size for persistence diagram")
-    parser.add_argument('--patch_size', type=int, default=5, help="Patch size for pixelization")
-    parser.add_argument('--embed_dim', type=int, default=192, help="Embedding dimension")
-    parser.add_argument('--depth', type=int, default=5, help="Depth of the model")
-    parser.add_argument('--epochs', type=int, default=300, help="Number of epochs to train")
-    parser.add_argument('--lr', type=float, default=0.001, help="Learning rate")
-    parser.add_argument('--warmup_t', type=int, default=50, help="Warmup steps for the scheduler")
-    parser.add_argument('--batch_size', type=int, default=64, help="Batch size")
-    parser.add_argument('--n_splits', type=int, default=10, help="Number of splits for cross-validation")
+    parser = argparse.ArgumentParser(description='Train model with persistence diagrams.')
+    parser.add_argument('--samples_per_class', type=int, default=1000, help='Number of samples per class.') # Choose from [1000, 20000]
+    parser.add_argument('--num_repeat', type=int, default=5, help='Number of times to repeat training.')
+    parser.add_argument('--patch_size', type=int, default=5, help='Patch size for persistence diagram.') 
+    parser.add_argument('--embed_dim', type=int, default=192, help='Embedding dimension.')
+    parser.add_argument('--depth', type=int, default=5, help='Depth of the model.')
+    parser.add_argument('--patience', type=int, default=50, help='Patience for early stopping.')
+    parser.add_argument('--model_name', type=str, default='xpert', help='Model to be used (xpert or persformer).')
     args = parser.parse_args()
     main(args)
