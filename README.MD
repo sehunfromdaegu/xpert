@@ -15,6 +15,14 @@ pip install -r requirements.txt
 python -m pip install -U giotto-deep
 conda install pyg=2.5.2 -c pyg
 ```
+## Optional: Fix scikit-learn errors
+
+If you encounter any errors related to scikit-learn, you can reinstall the correct version as follows:
+
+```bash
+pip uninstall scikit-learn
+pip install scikit-learn==1.1.1
+```
 
 ## Library modification
 There are issues with specific versions of PyTorch Geometric and giotto-deep. To resolve these, apply the following fixes:
