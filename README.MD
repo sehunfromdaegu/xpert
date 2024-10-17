@@ -68,3 +68,19 @@ For example, to train the xPerT model on the MUTAG dataset, run:
 ```bash
 python graph_classification.py --dataname MUTAG --model xpert
 ```
+
+## Classification on ORBIT dataset
+To perform classification on ORBIT5K datasets, use the following command:
+
+```bash
+python orbit_classification.py
+```
+
+To perform classification on ORBIT5K datasets, use the following command:
+
+```bash
+python orbit_classification.py --samples_per_class 20000
+```
+
+
+
