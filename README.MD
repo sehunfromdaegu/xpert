@@ -43,5 +43,28 @@ labels = np.loadtxt(graph_labels, delimiter=",", dtype=np.int32).T             #
 ```
 
 ## Classification on Graph Datasets
+To perform classification on graph datasets, use the following command:
 
-## Library modification
+```bash
+python graph_classification.py --dataname <dataset> --model <modelname>
+```
+
+- `dataset`: Choose from the available options:
+  - 'IMDB-BINARY'
+  - 'IMDB-MULTI'
+  - 'MUTAG'
+  - 'PROTEINS'
+  - 'COX2'
+  - 'DHFR'
+  
+- `modelname`: Specify the model to be used:
+  - 'xpert' (Extended Persistence Transformer)
+  - 'gin' (Graph Isomorphism Network)
+  - 'gin_assisted_concat' (GIN + xPerT by concat representations)
+  - 'gin_assisted_sum' (GIN + xPerT by summing representations)
+
+For example, to train the xPerT model on the MUTAG dataset, run:
+
+```bash
+python graph_classification.py --dataname MUTAG --model xpert
+```
