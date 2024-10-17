@@ -1,55 +1,10 @@
-# giotto-tda>=0.6.0
-# numpy<=1.23.3
-# pandas
-# plotly
-# matplotlib<=3.6.3
-# matplotlib_venn
-# scikit-learn==1.1.1
-# torch==1.12.1
-# spacy
-# scipy
-# networkx
-# torch-tb-profiler
-# torchdiffeq
-# torchensemble
-# torchtext
-# torchvision
-# torchdata
-# transformers
-# einops
-# tensorboard
-# captum
-# rq
-# rq-dashboard
-# redis
-# psutil
-# kaleido
-# html2image
-# optuna
-# sphinx_rtd_theme
-# giotto-ph
-# tqdm
-# Pillow<=9.5.0
-# h5py
-# mysql-connector-python
-# dotmap
-# sympy
-# google-cloud-storage
-# wget
-# ipython
-# jsonpickle
-# typing_extensions; python_version == '3.7'
-# gudhi
-# pre-commit
-
-
 giotto-tda>=0.6.0
 numpy<=1.23.3
 pandas==2.2.3
 plotly==5.24.1
 matplotlib<=3.6.3
 matplotlib-venn==1.1.1
-scikit-learn==1.1.1
+scikit-learn==1.2.0
 torch==1.12.1
 spacy==3.7.6
 scipy==1.10.1
@@ -86,3 +41,4 @@ jsonpickle==3.3.0
 typing_extensions==4.11.0; python_version == '3.7'
 gudhi==3.10.1
 pre-commit==3.8.0
+timm
