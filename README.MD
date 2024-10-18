@@ -7,7 +7,8 @@ This repository contains code for training a GNN model (`GIN`) using `PyTorch Ge
 Follow the steps below to set up the required environment:
 
 ```bash
-# Create a new conda environment
+git clone https://github.com/sehunfromdaegu/xpert.git
+cd xpert
 conda create --name xpert python=3.9
 conda activate xpert
 conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.6 -c pytorch -c conda-forge
